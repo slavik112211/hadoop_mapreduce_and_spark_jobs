@@ -28,11 +28,59 @@ import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
 import org.kohsuke.args4j.ParserProperties;
 
+import ca.uwaterloo.cs.bigdata2016w.slavik112211.assignment0.Context;
+import ca.uwaterloo.cs.bigdata2016w.slavik112211.assignment0.IntWritable;
 import tl.lin.data.pair.PairOfStrings;
 
 public class PairsPMI  extends Configured implements Tool {
   private static final Logger LOG = Logger.getLogger(PairsPMI.class);
 
+  protected static class CountingWordsMapper extends Mapper<LongWritable, Text, Text, IntWritable> {
+	    private static final IntWritable ONE = new IntWritable(1);
+	    private final static Text WORD = new Text();
+	    private final static String LINE = "*line";
+	    
+	    @Override
+	    public void map(LongWritable key, Text value, Context context)
+	        throws IOException, InterruptedException {
+	      String line = ((Text) value).toString();
+	      StringTokenizer itr = new StringTokenizer(line);
+
+	      int cnt = 0;
+	      Set set = Sets.newHashSet();
+	      while (itr.hasMoreTokens()) {
+	          cnt++;
+	          String w = itr.nextToken().toLowerCase().replaceAll("(^[^a-z]+|[^a-z]+$)", "");
+	          if (w.length() == 0) continue;
+	          set.add(w);
+	          WORD.set(w);
+	          context.write(WORD, ONE);
+	          if (cnt >= 100) break;
+	      }
+	      WORD.set(LINE);
+	      context.write(WORD, ONE);
+	    }
+	  }
+  
+  // Reducer: sums up all the counts.
+  private static class CountingWordsReducer extends Reducer<Text, IntWritable, Text, IntWritable> {
+    // Reuse objects.
+    private final static IntWritable SUM = new IntWritable();
+
+    @Override
+    public void reduce(Text key, Iterable<IntWritable> values, Context context)
+        throws IOException, InterruptedException {
+      // Sum up values.
+      Iterator<IntWritable> iter = values.iterator();
+      int sum = 0;
+      while (iter.hasNext()) {
+        sum += iter.next().get();
+      }
+      SUM.set(sum);
+      context.write(key, SUM);
+    }
+  }
+  
   protected static class MyMapper extends Mapper<LongWritable, Text, PairOfStrings, FloatWritable> {
     private static final FloatWritable ONE = new FloatWritable(1);
     private static final PairOfStrings BIGRAM = new PairOfStrings();
@@ -41,21 +89,22 @@ public class PairsPMI  extends Configured implements Tool {
     public void map(LongWritable key, Text value, Context context)
         throws IOException, InterruptedException {
       String line = ((Text) value).toString();
-
-      List<String> tokens = new ArrayList<String>();
       StringTokenizer itr = new StringTokenizer(line);
-      while (itr.hasMoreTokens()) {
-        String w = itr.nextToken().toLowerCase().replaceAll("(^[^a-z]+|[^a-z]+$)", "");
-        if (w.length() == 0) continue;
-        tokens.add(w);
-      }
 
-      if (tokens.size() < 2) return;
+      int cnt = 0;
+      Set set = Sets.newHashSet();
+      while (itr.hasMoreTokens()) {
+          cnt++;
+          String w = itr.nextToken().toLowerCase().replaceAll("(^[^a-z]+|[^a-z]+$)", "");
+          if (w.length() == 0) continue;
+          set.add(w);
+          if (cnt >= 100) break;
+        }
+      
+      String[] words = new String[set.size()];
+      words = set.toArray(words);
       for (int i = 1; i < tokens.size(); i++) {
         BIGRAM.set(tokens.get(i - 1), tokens.get(i));
-        context.write(BIGRAM, ONE);
-
-        BIGRAM.set(tokens.get(i - 1), "*");
         context.write(BIGRAM, ONE);
       }
     }
@@ -159,20 +208,30 @@ public class PairsPMI  extends Configured implements Tool {
     FileInputFormat.setInputPaths(job, new Path(args.input));
     FileOutputFormat.setOutputPath(job, new Path(args.output));
 
-    job.setMapOutputKeyClass(PairOfStrings.class);
-    job.setMapOutputValueClass(FloatWritable.class);
-    job.setOutputKeyClass(PairOfStrings.class);
-    job.setOutputValueClass(FloatWritable.class);
+//    job.setMapOutputKeyClass(PairOfStrings.class);
+//    job.setMapOutputValueClass(FloatWritable.class);
+//    job.setOutputKeyClass(PairOfStrings.class);
+//    job.setOutputValueClass(FloatWritable.class);
+    
+    job.setMapOutputKeyClass(Text.class);
+    job.setMapOutputKeyClass(IntWritable.class);
+    job.setOutputKeyClass(Text.class);
+    job.setOutputValueClass(IntWritable.class);
+    
     if (args.textOutput) {
       job.setOutputFormatClass(TextOutputFormat.class);
     } else {
       job.setOutputFormatClass(SequenceFileOutputFormat.class);
     }
 
-    job.setMapperClass(MyMapper.class);
-    job.setCombinerClass(MyCombiner.class);
-    job.setReducerClass(MyReducer.class);
-    job.setPartitionerClass(MyPartitioner.class);
+//    job.setMapperClass(MyMapper.class);
+//    job.setCombinerClass(MyCombiner.class);
+//    job.setReducerClass(MyReducer.class);
+//    job.setPartitionerClass(MyPartitioner.class);
+    
+    job.setMapperClass(CountingWordsMapper.class);
+    job.setCombinerClass(CountingWordsReducer.class);
+    job.setReducerClass(CountingWordsReducer.class);
 
     // Delete the output directory if it exists already.
     Path outputDir = new Path(args.output);
