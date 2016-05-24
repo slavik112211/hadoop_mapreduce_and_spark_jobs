@@ -1,25 +1,25 @@
 package ca.uwaterloo.cs.bigdata2016w.slavik112211.assignment1;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Iterator;
-import java.util.List;
+import java.util.Set;
 import java.util.StringTokenizer;
 
+import com.google.common.collect.Sets;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.FloatWritable;
+import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
-import org.apache.hadoop.mapreduce.Partitioner;
 import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.input.KeyValueTextInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
-import org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat;
-import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.log4j.Logger;
@@ -28,134 +28,149 @@ import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
 import org.kohsuke.args4j.ParserProperties;
 
-import ca.uwaterloo.cs.bigdata2016w.slavik112211.assignment0.Context;
-import ca.uwaterloo.cs.bigdata2016w.slavik112211.assignment0.IntWritable;
 import tl.lin.data.pair.PairOfStrings;
 
-public class PairsPMI  extends Configured implements Tool {
+/*
+* MapReduce job to calculate Pointwise mutual information of 2 words PMI(x,y) in a text corpora.
+* Kenneth W. Church and Patrick Hanks. Word association norms, mutual information, and lexicography, 1990
+* Calculation consists of 3 steps: map - reduce - map.
+* See assignments.html #1 for details on the task.
+* See assignment1.odt for details on solution.
+* */
+public class PairsPMI extends Configured implements Tool {
   private static final Logger LOG = Logger.getLogger(PairsPMI.class);
+  enum Lines { TOTAL_COUNT }
+  private static final String PLACEHOLDER_WORD = "*";
+  private static final String outputPathWordsCounts = "wordsCounts/output";
+  private static final String outputPathWordPairsCounts = "wordPairsCounts/output";
+  private static final String inputPathWordPairsCounts = "wordPairsCounts";
 
-  protected static class CountingWordsMapper extends Mapper<LongWritable, Text, Text, IntWritable> {
-	    private static final IntWritable ONE = new IntWritable(1);
-	    private final static Text WORD = new Text();
-	    private final static String LINE = "*line";
-	    
-	    @Override
-	    public void map(LongWritable key, Text value, Context context)
-	        throws IOException, InterruptedException {
-	      String line = ((Text) value).toString();
-	      StringTokenizer itr = new StringTokenizer(line);
+  protected static class UniqueWordsAndWordPairsCounterMapper extends Mapper<LongWritable, Text, PairOfStrings, IntWritable> {
+    private static final PairOfStrings PAIR = new PairOfStrings();
+    private static final IntWritable ONE = new IntWritable(1);
 
-	      int cnt = 0;
-	      Set set = Sets.newHashSet();
-	      while (itr.hasMoreTokens()) {
-	          cnt++;
-	          String w = itr.nextToken().toLowerCase().replaceAll("(^[^a-z]+|[^a-z]+$)", "");
-	          if (w.length() == 0) continue;
-	          set.add(w);
-	          WORD.set(w);
-	          context.write(WORD, ONE);
-	          if (cnt >= 100) break;
-	      }
-	      WORD.set(LINE);
-	      context.write(WORD, ONE);
-	    }
-	  }
-  
-  // Reducer: sums up all the counts.
-  private static class CountingWordsReducer extends Reducer<Text, IntWritable, Text, IntWritable> {
-    // Reuse objects.
-    private final static IntWritable SUM = new IntWritable();
-
-    @Override
-    public void reduce(Text key, Iterable<IntWritable> values, Context context)
-        throws IOException, InterruptedException {
-      // Sum up values.
-      Iterator<IntWritable> iter = values.iterator();
-      int sum = 0;
-      while (iter.hasNext()) {
-        sum += iter.next().get();
-      }
-      SUM.set(sum);
-      context.write(key, SUM);
-    }
-  }
-  
-  protected static class MyMapper extends Mapper<LongWritable, Text, PairOfStrings, FloatWritable> {
-    private static final FloatWritable ONE = new FloatWritable(1);
-    private static final PairOfStrings BIGRAM = new PairOfStrings();
-
-    @Override
-    public void map(LongWritable key, Text value, Context context)
-        throws IOException, InterruptedException {
-      String line = ((Text) value).toString();
+    public static String[] extractUniqueWordsFromInputLine(Text value){
+      String line = value.toString();
       StringTokenizer itr = new StringTokenizer(line);
 
       int cnt = 0;
       Set set = Sets.newHashSet();
       while (itr.hasMoreTokens()) {
-          cnt++;
-          String w = itr.nextToken().toLowerCase().replaceAll("(^[^a-z]+|[^a-z]+$)", "");
-          if (w.length() == 0) continue;
-          set.add(w);
-          if (cnt >= 100) break;
-        }
-      
+        cnt++;
+        String w = itr.nextToken().toLowerCase().replaceAll("(^[^a-z]+|[^a-z]+$)", "");
+        if (w.length() == 0) continue;
+        set.add(w);
+        if (cnt >= 100) break;
+      }
+
       String[] words = new String[set.size()];
-      words = set.toArray(words);
-      for (int i = 1; i < tokens.size(); i++) {
-        BIGRAM.set(tokens.get(i - 1), tokens.get(i));
-        context.write(BIGRAM, ONE);
-      }
+      words = (String[]) set.toArray(words);
+      return words;
     }
-  }
-
-  protected static class MyCombiner extends
-      Reducer<PairOfStrings, FloatWritable, PairOfStrings, FloatWritable> {
-    private static final FloatWritable SUM = new FloatWritable();
 
     @Override
-    public void reduce(PairOfStrings key, Iterable<FloatWritable> values, Context context)
+    public void map(LongWritable inputLineKey, Text inputLine, Context context)
         throws IOException, InterruptedException {
-      int sum = 0;
-      Iterator<FloatWritable> iter = values.iterator();
-      while (iter.hasNext()) {
-        sum += iter.next().get();
+      String[] uniqueWords = this.extractUniqueWordsFromInputLine(inputLine);
+
+      // 1. Emit encountered single words to reducer. This is needed to calculate
+      // Pr[word x appears in a line]=#[word x appeared in a line]/#[total input lines]
+      // these Pr(x) are used in PMI(x,y) formula denominator.
+
+      // Single words are emitted as pairs(PLACEHOLDER_WORD, word), since this same mapper
+      // also emits pairsOfWords(x,y), and mapper output has to match in both cases.
+      for (String word : uniqueWords) {
+        PAIR.set(PLACEHOLDER_WORD, word);
+        context.write(PAIR, ONE);
       }
-      SUM.set(sum);
-      context.write(key, SUM);
+
+      // 2. Emit encountered word pairs to reducer. This is needed to calculate
+      // Pr[words x and y appear in a line]=#[words x and y appeared in a line]/#[total input lines]
+      // these Pr(x,y) are used in PMI(x,y) formula nominator
+      if (uniqueWords.length > 1) {
+        for (int i = 0; i < uniqueWords.length; i++) {
+          for (int j = 0; j < uniqueWords.length; j++) {
+            if(i==j) continue;
+            PAIR.set(uniqueWords[i], uniqueWords[j]);
+            context.write(PAIR, ONE);
+          }
+        }
+      }
+
+      // 3. Account this inputLine to calculate #[total input lines] in reducer
+      context.getCounter(Lines.TOTAL_COUNT).increment(1);
     }
   }
 
-  protected static class MyReducer extends
-      Reducer<PairOfStrings, FloatWritable, PairOfStrings, FloatWritable> {
-    private static final FloatWritable VALUE = new FloatWritable();
-    private float marginal = 0.0f;
+  private static class UniqueWordsAndWordPairsCounterCombiner
+          extends Reducer<PairOfStrings, IntWritable, PairOfStrings, IntWritable> {
+    private static final IntWritable SUM = new IntWritable();
 
     @Override
-    public void reduce(PairOfStrings key, Iterable<FloatWritable> values, Context context)
+    public void reduce(PairOfStrings wordsPair, Iterable<IntWritable> wordsPairPartialCount, Context context)
+            throws IOException, InterruptedException {
+      int wordsPairAccumulator = 0;
+      Iterator<IntWritable> iter = wordsPairPartialCount.iterator();
+      while (iter.hasNext())
+        wordsPairAccumulator += iter.next().get();
+      SUM.set(wordsPairAccumulator);
+      context.write(wordsPair, SUM);
+    }
+  }
+
+  private static class UniqueWordsAndWordPairsCounterReducer
+          extends Reducer<PairOfStrings, IntWritable, PairOfStrings, IntWritable> {
+    private static final IntWritable SUM = new IntWritable();
+    private MultipleOutputs<PairOfStrings, IntWritable> multipleOutputs;
+
+    @Override
+    protected void setup(Context context) throws IOException, InterruptedException {
+      multipleOutputs = new MultipleOutputs<PairOfStrings, IntWritable>(context);
+    }
+
+    @Override
+    protected void cleanup(Context context) throws IOException, InterruptedException {
+      multipleOutputs.close();
+    }
+
+    /**
+     * If first element in word pair is a PLACEHOLDER_WORD,
+     * then it's not a pair, but rather a single-word occurrence counter.
+     * We put this single-word counters aside into separate files.
+     * In the actual PMI(x,y) calculation in second map job these files
+     * are pulled up as a distributed cache
+     */
+    protected String getOutputPathForKey(PairOfStrings key) {
+      return (key.getLeftElement().equals(PLACEHOLDER_WORD) ?
+              outputPathWordsCounts : outputPathWordPairsCounts);
+    }
+
+    @Override
+    public void reduce(PairOfStrings wordsPair, Iterable<IntWritable> wordsPairPartialCount, Context context)
         throws IOException, InterruptedException {
-      float sum = 0.0f;
-      Iterator<FloatWritable> iter = values.iterator();
-      while (iter.hasNext()) {
-        sum += iter.next().get();
-      }
-
-      if (key.getRightElement().equals("*")) {
-        VALUE.set(sum);
-        context.write(key, VALUE);
-        marginal = sum;
-      } else {
-        VALUE.set(sum / marginal);
-        context.write(key, VALUE);
-      }
+      int wordsPairAccumulator = 0;
+      Iterator<IntWritable> iter = wordsPairPartialCount.iterator();
+      while (iter.hasNext())
+        wordsPairAccumulator += iter.next().get();
+      SUM.set(wordsPairAccumulator);
+      multipleOutputs.write(wordsPair, SUM, getOutputPathForKey(wordsPair));
     }
   }
+//  float wordsPairProbability = ((float) wordsPairTotalCount)/((float)context.getCounter(Lines.TOTAL_COUNT).getValue());
 
-  protected static class MyPartitioner extends Partitioner<PairOfStrings, FloatWritable> {
+  protected static class PointwiseMutualInformationMapper extends Mapper<Text, Text, Text, Text> {
+    private long linesTotalCount;
+
     @Override
-    public int getPartition(PairOfStrings key, FloatWritable value, int numReduceTasks) {
-      return (key.getLeftElement().hashCode() & Integer.MAX_VALUE) % numReduceTasks;
+    protected void setup(Context context) throws IOException, InterruptedException {
+      linesTotalCount = context.getConfiguration().getLong("linesTotalCount", 1);
+      LOG.info("Job2. linesTotalCount: " + linesTotalCount);
+    }
+
+    @Override
+    public void map(Text wordsPair, Text count, Context context)
+            throws IOException, InterruptedException {
+      context.write(wordsPair, count);
     }
   }
 
@@ -173,9 +188,6 @@ public class PairsPMI  extends Configured implements Tool {
 
     @Option(name = "-reducers", metaVar = "[num]", required = false, usage = "number of reducers")
     public int numReducers = 1;
-
-    @Option(name = "-textOutput", required = false, usage = "use TextOutputFormat (otherwise, SequenceFileOutputFormat)")
-    public boolean textOutput = false;
   }
 
   /**
@@ -197,49 +209,57 @@ public class PairsPMI  extends Configured implements Tool {
     LOG.info(" - input path: " + args.input);
     LOG.info(" - output path: " + args.output);
     LOG.info(" - num reducers: " + args.numReducers);
-    LOG.info(" - text output: " + args.textOutput);
 
-    Job job = Job.getInstance(getConf());
+    Configuration jobConfig = getConf();
+
+    Job job = Job.getInstance(jobConfig);
     job.setJobName(PairsPMI.class.getSimpleName());
     job.setJarByClass(PairsPMI.class);
 
     job.setNumReduceTasks(args.numReducers);
-
+//    job.setOutputFormatClass(SequenceFileOutputFormat.class);
     FileInputFormat.setInputPaths(job, new Path(args.input));
     FileOutputFormat.setOutputPath(job, new Path(args.output));
 
-//    job.setMapOutputKeyClass(PairOfStrings.class);
-//    job.setMapOutputValueClass(FloatWritable.class);
-//    job.setOutputKeyClass(PairOfStrings.class);
-//    job.setOutputValueClass(FloatWritable.class);
-    
-    job.setMapOutputKeyClass(Text.class);
-    job.setMapOutputKeyClass(IntWritable.class);
-    job.setOutputKeyClass(Text.class);
-    job.setOutputValueClass(IntWritable.class);
-    
-    if (args.textOutput) {
-      job.setOutputFormatClass(TextOutputFormat.class);
-    } else {
-      job.setOutputFormatClass(SequenceFileOutputFormat.class);
-    }
+    job.setMapOutputKeyClass(PairOfStrings.class);
+    job.setMapOutputValueClass(IntWritable.class);
 
-//    job.setMapperClass(MyMapper.class);
-//    job.setCombinerClass(MyCombiner.class);
-//    job.setReducerClass(MyReducer.class);
-//    job.setPartitionerClass(MyPartitioner.class);
-    
-    job.setMapperClass(CountingWordsMapper.class);
-    job.setCombinerClass(CountingWordsReducer.class);
-    job.setReducerClass(CountingWordsReducer.class);
+    job.setMapperClass(UniqueWordsAndWordPairsCounterMapper.class);
+    job.setCombinerClass(UniqueWordsAndWordPairsCounterCombiner.class);
+    job.setReducerClass(UniqueWordsAndWordPairsCounterReducer.class);
 
     // Delete the output directory if it exists already.
     Path outputDir = new Path(args.output);
-    FileSystem.get(getConf()).delete(outputDir, true);
+    FileSystem.get(jobConfig).delete(outputDir, true);
 
     long startTime = System.currentTimeMillis();
     job.waitForCompletion(true);
-    System.out.println("Job Finished in " + (System.currentTimeMillis() - startTime) / 1000.0 + " seconds");
+
+    jobConfig.setLong("linesTotalCount", job.getCounters().findCounter(Lines.TOTAL_COUNT).getValue());
+    System.out.println("First job finished in " + (System.currentTimeMillis() - startTime) / 1000.0 + " seconds");
+
+    // --------------------------------------------------
+    // 2nd MapReduce job. Only has a mapper, no reduce step.
+    // Calculation of PMI(x,y) values based on the uniqueWord and uniqueWordPairs counts received in first MR job
+    Job job2 = Job.getInstance(jobConfig);
+    job2.setJobName(PairsPMI.class.getSimpleName());
+    job2.setJarByClass(PairsPMI.class);
+
+    job2.setNumReduceTasks(args.numReducers);
+    job2.setInputFormatClass(KeyValueTextInputFormat.class); //SequenceFileInputFormat
+    FileInputFormat.setInputPaths(job2, new Path(args.output+"/"+inputPathWordPairsCounts));
+    FileOutputFormat.setOutputPath(job2, new Path(args.output+"/second_job"));
+    job2.setMapOutputKeyClass(Text.class);
+    job2.setMapOutputValueClass(Text.class);
+    job2.setMapperClass(PointwiseMutualInformationMapper.class);
+
+    // Delete the output directory if it exists already.
+    Path outputDir2 = new Path(args.output+"/second_job");
+    FileSystem.get(jobConfig).delete(outputDir2, true);
+
+    long startTime2 = System.currentTimeMillis();
+    job2.waitForCompletion(true);
+    System.out.println("Second job finished in " + (System.currentTimeMillis() - startTime2) / 1000.0 + " seconds");
 
     return 0;
   }
