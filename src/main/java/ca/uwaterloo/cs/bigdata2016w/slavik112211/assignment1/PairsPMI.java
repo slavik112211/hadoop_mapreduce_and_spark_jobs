@@ -17,9 +17,11 @@ import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
-import org.apache.hadoop.mapreduce.lib.input.KeyValueTextInputFormat;
+import org.apache.hadoop.mapreduce.lib.input.SequenceFileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
+import org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.log4j.Logger;
@@ -121,6 +123,8 @@ public class PairsPMI extends Configured implements Tool {
   private static class UniqueWordsAndWordPairsCounterReducer
           extends Reducer<PairOfStrings, IntWritable, PairOfStrings, IntWritable> {
     private static final IntWritable SUM = new IntWritable();
+    public static final String firstJobOutputChannel = "firstJobOutput";
+
     private MultipleOutputs<PairOfStrings, IntWritable> multipleOutputs;
 
     @Override
@@ -153,22 +157,24 @@ public class PairsPMI extends Configured implements Tool {
       while (iter.hasNext())
         wordsPairAccumulator += iter.next().get();
       SUM.set(wordsPairAccumulator);
-      multipleOutputs.write(wordsPair, SUM, getOutputPathForKey(wordsPair));
+      multipleOutputs.write(firstJobOutputChannel, wordsPair, SUM, getOutputPathForKey(wordsPair));
     }
   }
 //  float wordsPairProbability = ((float) wordsPairTotalCount)/((float)context.getCounter(Lines.TOTAL_COUNT).getValue());
 
-  protected static class PointwiseMutualInformationMapper extends Mapper<Text, Text, Text, Text> {
+  protected static class PointwiseMutualInformationMapper extends Mapper<PairOfStrings, IntWritable, PairOfStrings, IntWritable> {
     private long linesTotalCount;
 
     @Override
     protected void setup(Context context) throws IOException, InterruptedException {
       linesTotalCount = context.getConfiguration().getLong("linesTotalCount", 1);
       LOG.info("Job2. linesTotalCount: " + linesTotalCount);
+//      metadata = new NcdcStationMetadata();
+//      metadata.initialize(new File("stations-fixed-width.txt"));
     }
 
     @Override
-    public void map(Text wordsPair, Text count, Context context)
+    public void map(PairOfStrings wordsPair, IntWritable count, Context context)
             throws IOException, InterruptedException {
       context.write(wordsPair, count);
     }
@@ -217,7 +223,8 @@ public class PairsPMI extends Configured implements Tool {
     job.setJarByClass(PairsPMI.class);
 
     job.setNumReduceTasks(args.numReducers);
-//    job.setOutputFormatClass(SequenceFileOutputFormat.class);
+    MultipleOutputs.addNamedOutput(job, UniqueWordsAndWordPairsCounterReducer.firstJobOutputChannel,
+        SequenceFileOutputFormat.class, PairOfStrings.class, IntWritable.class);
     FileInputFormat.setInputPaths(job, new Path(args.input));
     FileOutputFormat.setOutputPath(job, new Path(args.output));
 
@@ -246,11 +253,12 @@ public class PairsPMI extends Configured implements Tool {
     job2.setJarByClass(PairsPMI.class);
 
     job2.setNumReduceTasks(args.numReducers);
-    job2.setInputFormatClass(KeyValueTextInputFormat.class); //SequenceFileInputFormat
+    job2.setInputFormatClass(SequenceFileInputFormat.class);
+    job2.setOutputFormatClass(TextOutputFormat.class);
     FileInputFormat.setInputPaths(job2, new Path(args.output+"/"+inputPathWordPairsCounts));
     FileOutputFormat.setOutputPath(job2, new Path(args.output+"/second_job"));
-    job2.setMapOutputKeyClass(Text.class);
-    job2.setMapOutputValueClass(Text.class);
+    job2.setMapOutputKeyClass(PairOfStrings.class);
+    job2.setMapOutputValueClass(IntWritable.class);
     job2.setMapperClass(PointwiseMutualInformationMapper.class);
 
     // Delete the output directory if it exists already.
