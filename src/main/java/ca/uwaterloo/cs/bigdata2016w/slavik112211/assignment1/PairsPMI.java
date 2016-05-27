@@ -1,6 +1,8 @@
 package ca.uwaterloo.cs.bigdata2016w.slavik112211.assignment1;
 
 import java.io.IOException;
+import java.net.URI;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Set;
 import java.util.StringTokenizer;
@@ -12,6 +14,7 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.SequenceFile;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
@@ -164,13 +167,39 @@ public class PairsPMI extends Configured implements Tool {
 
   protected static class PointwiseMutualInformationMapper extends Mapper<PairOfStrings, IntWritable, PairOfStrings, IntWritable> {
     private long linesTotalCount;
+    private HashMap<String, Integer> wordCount = new HashMap<String, Integer>(30000); //Shakespeare's dictionary size
 
     @Override
     protected void setup(Context context) throws IOException, InterruptedException {
-      linesTotalCount = context.getConfiguration().getLong("linesTotalCount", 1);
+      Configuration conf = context.getConfiguration();
+      linesTotalCount = conf.getLong("linesTotalCount", 1);
       LOG.info("Job2. linesTotalCount: " + linesTotalCount);
-//      metadata = new NcdcStationMetadata();
-//      metadata.initialize(new File("stations-fixed-width.txt"));
+
+      //http://stackoverflow.com/questions/24647992/wildcard-in-hadoops-filesystem-listing-api-calls
+//      FileSystem fs = FileSystem.get(URI.create("./wordsCounts/output-r-00000"), conf);
+      context.getFile
+      RemoteIterator<LocatedFileStatus> files = filesystem.listFiles(new Path("./wordsCounts/output-r-00000"), true);
+      Pattern pattern = Pattern.compile("^.*/date=[0-9]{8}/A-schema\\.avsc$");
+      while (files.hasNext()) {
+        Path path = files.next().getPath();
+        if (pattern.matcher(path.toString()).matches())
+        {
+          System.out.println(path);
+        }
+      }
+
+
+      Path path = new Path("./wordsCounts/output-r-00000");
+      SequenceFile.Reader reader = new SequenceFile.Reader(conf, SequenceFile.Reader.file(path));
+      PairOfStrings key = new PairOfStrings();
+      IntWritable val = new IntWritable();
+
+      while (reader.next(key, val)) {
+        wordCount.put(key.getRightElement(), val.get());
+      }
+      reader.close();
+      LOG.info("Job2. dictionary loaded in memory. Size: " + wordCount.size());
+      LOG.info("Job2. word 'wise' count: " + wordCount.get("wise"));
     }
 
     @Override
