@@ -1,0 +1,2 @@
+ ../../wikiextractor/WikiExtractor.py -b 10000000000 --no-templates -a enwiki-20151201-pages-articles14.xml-p003125001p003924999 > file
+
