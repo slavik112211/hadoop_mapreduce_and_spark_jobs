@@ -1,0 +1,1 @@
+cat data/pairsPMI_output/part* | sed -E 's/^(.*), (.*)$/\2 \1/' | sort -nr > data/pairsPMI_output/mapreducePairsPMI.sorted

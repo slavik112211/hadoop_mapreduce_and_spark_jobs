@@ -44,9 +44,11 @@ public class PairsPMI extends Configured implements Tool {
   private static final Logger LOG = Logger.getLogger(PairsPMI.class);
   enum Lines { TOTAL_COUNT }
   private static final String PLACEHOLDER_WORD = "*";
+  private static final String firstJobOutputPath = "./data/firstjobOutput/";
   private static final String outputPathWordsCounts = "wordsCounts/output";
+  private static final String inputPathWordsCounts = "wordsCounts/";
   private static final String outputPathWordPairsCounts = "wordPairsCounts/output";
-  private static final String inputPathWordPairsCounts = "wordPairsCounts";
+  private static final String inputPathWordPairsCounts = "wordPairsCounts/";
 
   protected static class UniqueWordsAndWordPairsCounterMapper extends Mapper<LongWritable, Text, PairOfStrings, IntWritable> {
     private static final PairOfStrings PAIR = new PairOfStrings();
@@ -155,22 +157,26 @@ public class PairsPMI extends Configured implements Tool {
         throws IOException, InterruptedException {
       int wordsPairAccumulator = 0;
       Iterator<IntWritable> iter = wordsPairPartialCount.iterator();
-      while (iter.hasNext())
-        wordsPairAccumulator += iter.next().get();
+      while (iter.hasNext()) wordsPairAccumulator += iter.next().get();
+
+      // To reduce the number of spurious pairs, we are only interested
+      // in pairs of words that co-occur in ten or more lines.
+      if(!wordsPair.getLeftElement().equals(PLACEHOLDER_WORD) && wordsPairAccumulator<10) return;
+
       SUM.set(wordsPairAccumulator);
       multipleOutputs.write(firstJobOutputChannel, wordsPair, SUM, getOutputPathForKey(wordsPair));
     }
   }
-//  float wordsPairProbability = ((float) wordsPairTotalCount)/((float)context.getCounter(Lines.TOTAL_COUNT).getValue());
 
   public static class FloatArrayWritable extends ArrayWritable {
     public FloatArrayWritable() { super(FloatWritable.class); }
 
     public String toString(){
       String stringValue="";
-      for(Writable value : get()){
-        stringValue+=String.format("%.17f", ((FloatWritable) value).get());
-//        stringValue+=", ";
+      Writable[] valuesArray = get();
+      for(int i=0; i<valuesArray.length; i++){
+        stringValue+=String.format("%.5f", ((FloatWritable) valuesArray[i]).get());
+        if(i!=valuesArray.length-1) stringValue+=", ";
       }
       return stringValue;
     }
@@ -182,13 +188,13 @@ public class PairsPMI extends Configured implements Tool {
     private static final FloatWritable
       countWordA   = new FloatWritable(), probabilityWordA  = new FloatWritable(),
       countWordB   = new FloatWritable(), probabilityWordB  = new FloatWritable(),
-      countWordsAB = new FloatWritable(), probabilityWordAB = new FloatWritable(),
+      countWordsAB = new FloatWritable(), probabilityWordsAB = new FloatWritable(),
       wordsAB_PMI  = new FloatWritable(), wordsAB_PMIlog10 = new FloatWritable();
     private static final FloatArrayWritable wordsPairPMIArray = new FloatArrayWritable();
-//    private static final FloatWritable[] wordsPairPMIValues = new FloatWritable[]{
-//      countWordA, probabilityWordA, countWordB, probabilityWordB,
-//      countWordsAB, probabilityWordAB, wordsAB_PMI, wordsAB_PMIlog10};
-    private static final FloatWritable[] wordsPairPMIValues = new FloatWritable[]{wordsAB_PMIlog10};
+    private static final FloatWritable[] wordsPairPMIValues = new FloatWritable[]{
+      countWordA, probabilityWordA, countWordB, probabilityWordB,
+      countWordsAB, probabilityWordsAB, wordsAB_PMI, wordsAB_PMIlog10};
+//    private static final FloatWritable[] wordsPairPMIValues = new FloatWritable[]{wordsAB_PMIlog10};
     private HashMap<String, Integer> dictionaryWordCount = new HashMap<String, Integer>(30000); //Shakespeare's dictionary size
 
     @Override
@@ -210,7 +216,7 @@ public class PairsPMI extends Configured implements Tool {
 //        }
 //      }
       localFiles = DistributedCache.getLocalCacheFiles(conf);
-      Path dictionaryCount = new Path("./firstjobOutput/wordsCounts/output-r-00000");
+      Path dictionaryCount = new Path(firstJobOutputPath+inputPathWordsCounts+"/output-r-00000");
       SequenceFile.Reader reader = new SequenceFile.Reader(conf, SequenceFile.Reader.file(dictionaryCount));
       PairOfStrings key = new PairOfStrings();
       IntWritable val = new IntWritable();
@@ -225,7 +231,7 @@ public class PairsPMI extends Configured implements Tool {
     public void map(PairOfStrings wordsPair, IntWritable count, Context context)
             throws IOException, InterruptedException {
       countWordsAB.set((float) count.get());
-      probabilityWordAB.set(((float) count.get())/linesTotalCount);
+      probabilityWordsAB.set(((float) count.get())/linesTotalCount);
 
       countWordA.set((float) dictionaryWordCount.get(wordsPair.getLeftElement()));
       probabilityWordA.set(countWordA.get()/linesTotalCount);
@@ -233,7 +239,8 @@ public class PairsPMI extends Configured implements Tool {
       countWordB.set((float) dictionaryWordCount.get(wordsPair.getRightElement()));
       probabilityWordB.set(countWordB.get()/linesTotalCount);
 
-      wordsAB_PMI.set(probabilityWordAB.get()/probabilityWordA.get()*probabilityWordB.get());
+      //Calc 101 ;) Parenthesis are mandatory: 1a) 4/4*2=2; 2a) 4/2*4=8; whereas 1b) 4/(4*2)=0.5; 2b) 4/(2*4)=0.5
+      wordsAB_PMI.set(probabilityWordsAB.get()/(probabilityWordA.get()*probabilityWordB.get()));
       wordsAB_PMIlog10.set((float) Math.log10((double) wordsAB_PMI.get()));
       wordsPairPMIArray.set(wordsPairPMIValues);
       context.write(wordsPair, wordsPairPMIArray);
@@ -256,9 +263,6 @@ public class PairsPMI extends Configured implements Tool {
     public int numReducers = 1;
   }
 
-  /**
-   * Runs this tool.
-   */
   public int run(String[] argv) throws Exception {
     Args args = new Args();
     CmdLineParser parser = new CmdLineParser(args, ParserProperties.defaults().withUsageWidth(100));
@@ -286,7 +290,7 @@ public class PairsPMI extends Configured implements Tool {
     MultipleOutputs.addNamedOutput(job, UniqueWordsAndWordPairsCounterReducer.firstJobOutputChannel,
         SequenceFileOutputFormat.class, PairOfStrings.class, IntWritable.class);
     FileInputFormat.setInputPaths(job, new Path(args.input));
-    FileOutputFormat.setOutputPath(job, new Path("./firstjobOutput"));
+    FileOutputFormat.setOutputPath(job, new Path(firstJobOutputPath));
 
     job.setMapOutputKeyClass(PairOfStrings.class);
     job.setMapOutputValueClass(IntWritable.class);
@@ -296,7 +300,7 @@ public class PairsPMI extends Configured implements Tool {
     job.setReducerClass(UniqueWordsAndWordPairsCounterReducer.class);
 
     // Delete the output directory if it exists already.
-    Path outputDir = new Path("./firstjobOutput");
+    Path outputDir = new Path(firstJobOutputPath);
     FileSystem.get(jobConfig).delete(outputDir, true);
 
     long startTime = System.currentTimeMillis();
@@ -308,15 +312,15 @@ public class PairsPMI extends Configured implements Tool {
     // --------------------------------------------------
     // 2nd MapReduce job. Only has a mapper, no reduce step.
     // Calculation of PMI(x,y) values based on the uniqueWord and uniqueWordPairs counts received in first MR job
-    DistributedCache.addCacheFile(new URI("./firstjobOutput/wordsCounts/output-r-00000"), jobConfig);
+    DistributedCache.addCacheFile(new URI(firstJobOutputPath+inputPathWordsCounts+"/output-r-00000"), jobConfig);
     Job job2 = Job.getInstance(jobConfig);
     job2.setJobName(PairsPMI.class.getSimpleName());
     job2.setJarByClass(PairsPMI.class);
 
-    job2.setNumReduceTasks(args.numReducers);
+    job2.setNumReduceTasks(0);
     job2.setInputFormatClass(SequenceFileInputFormat.class);
     job2.setOutputFormatClass(TextOutputFormat.class);
-    FileInputFormat.setInputPaths(job2, new Path("./firstjobOutput/"+inputPathWordPairsCounts));
+    FileInputFormat.setInputPaths(job2, new Path(firstJobOutputPath+inputPathWordPairsCounts));
     FileOutputFormat.setOutputPath(job2, new Path(args.output));
 
     job2.setMapOutputKeyClass(PairOfStrings.class);
