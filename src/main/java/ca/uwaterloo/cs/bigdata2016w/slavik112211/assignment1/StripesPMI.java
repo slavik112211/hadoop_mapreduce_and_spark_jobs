@@ -8,7 +8,9 @@ import com.google.common.collect.Sets;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.io.*;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
@@ -28,6 +30,7 @@ import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
 import org.kohsuke.args4j.ParserProperties;
 
+import tl.lin.data.map.HMapStFW;
 import tl.lin.data.map.HMapStIW;
 import tl.lin.data.pair.PairOfStrings;
 
@@ -186,33 +189,12 @@ public class StripesPMI extends Configured implements Tool {
     }
   }
 
-  public static class FloatArrayWritable extends ArrayWritable {
-    public FloatArrayWritable() { super(FloatWritable.class); }
-
-    public String toString(){
-      String stringValue="";
-      Writable[] valuesArray = get();
-      for(int i=0; i<valuesArray.length; i++){
-        stringValue+=String.format("%.5f", ((FloatWritable) valuesArray[i]).get());
-        if(i!=valuesArray.length-1) stringValue+=", ";
-      }
-      return stringValue;
-    }
-  }
-
-  protected static class PointwiseMutualInformationMapper extends Mapper<PairOfStrings, IntWritable, PairOfStrings, FloatArrayWritable> {
+  protected static class PointwiseMutualInformationMapper extends Mapper<Text, HMapStIW, Text, HMapStFW> {
     private long linesTotalCount;
     Path[] localFiles;
-    private static final FloatWritable
-      countWordA   = new FloatWritable(), probabilityWordA  = new FloatWritable(),
-      countWordB   = new FloatWritable(), probabilityWordB  = new FloatWritable(),
-      countWordsAB = new FloatWritable(), probabilityWordsAB = new FloatWritable(),
-      wordsAB_PMI  = new FloatWritable(), wordsAB_PMIlog10 = new FloatWritable();
-    private static final FloatArrayWritable wordsPairPMIArray = new FloatArrayWritable();
-    private static final FloatWritable[] wordsPairPMIValues = new FloatWritable[]{
-      countWordA, probabilityWordA, countWordB, probabilityWordB,
-      countWordsAB, probabilityWordsAB, wordsAB_PMI, wordsAB_PMIlog10};
-//    private static final FloatWritable[] wordsPairPMIValues = new FloatWritable[]{wordsAB_PMIlog10};
+    float countWordsAB, probabilityWordsAB, countWordA, probabilityWordA, countWordB, probabilityWordB;
+    float wordsAB_PMI, wordsAB_PMIlog10;
+    private static final HMapStFW OUTPUT_MAP = new HMapStFW();
     private HashMap<String, Integer> dictionaryWordCount = new HashMap<String, Integer>(30000); //Shakespeare's dictionary size
 
     @Override
@@ -221,47 +203,51 @@ public class StripesPMI extends Configured implements Tool {
       linesTotalCount = conf.getLong("linesTotalCount", 1);
       LOG.info("Job2. linesTotalCount: " + linesTotalCount);
 
-      //http://stackoverflow.com/questions/24647992/wildcard-in-hadoops-filesystem-listing-api-calls
-//      FileSystem fs = FileSystem.get(URI.create("./wordsCounts/output-r-00000"), conf);
-//      context.getFile
-//      RemoteIterator<LocatedFileStatus> files = filesystem.listFiles(new Path("./wordsCounts/output-r-00000"), true);
-//      Pattern pattern = Pattern.compile("^.*/date=[0-9]{8}/A-schema\\.avsc$");
-//      while (files.hasNext()) {
-//        Path path = files.next().getPath();
-//        if (pattern.matcher(path.toString()).matches())
-//        {
-//          System.out.println(path);
-//        }
-//      }
-      localFiles = DistributedCache.getLocalCacheFiles(conf);
-      Path dictionaryCount = new Path(firstJobOutputPath+inputPathWordsCounts+"/output-r-00000");
-      SequenceFile.Reader reader = new SequenceFile.Reader(conf, SequenceFile.Reader.file(dictionaryCount));
-      PairOfStrings key = new PairOfStrings();
-      IntWritable val = new IntWritable();
-      while (reader.next(key, val)) {
-        dictionaryWordCount.put(key.getRightElement(), val.get());
+      FileSystem hdfs = FileSystem.get(conf);
+      RemoteIterator<LocatedFileStatus> dictionaryFiles =
+              hdfs.listFiles(new Path(firstJobOutputPath + inputPathWordsCounts), false);
+      Text key = new Text();
+      HMapStIW val = new HMapStIW();
+      String wordRHS;
+      while (dictionaryFiles.hasNext()) {
+        Path dictionaryFilePath = dictionaryFiles.next().getPath();
+        SequenceFile.Reader reader = new SequenceFile.Reader(conf, SequenceFile.Reader.file(dictionaryFilePath));
+        while (reader.next(key, val)) {
+          Iterator<String> currentMapIter = val.keySet().iterator();
+          while (currentMapIter.hasNext()) {
+            wordRHS = currentMapIter.next();
+            dictionaryWordCount.put(wordRHS, val.get(wordRHS));
+          }
+        }
+        reader.close();
+        LOG.info("Job2. dictionary " + dictionaryFilePath.getName() + " loaded in memory. Size: " + dictionaryWordCount.size());
       }
-      reader.close();
-      LOG.info("Job2. dictionary loaded in memory. Size: " + dictionaryWordCount.size());
     }
 
     @Override
-    public void map(PairOfStrings wordsPair, IntWritable count, Context context)
+    public void map(Text wordLHS, HMapStIW wordsRHSCountsMap, Context context)
             throws IOException, InterruptedException {
-      countWordsAB.set((float) count.get());
-      probabilityWordsAB.set(((float) count.get())/linesTotalCount);
+      String wordRHS;
+      OUTPUT_MAP.clear();
 
-      countWordA.set((float) dictionaryWordCount.get(wordsPair.getLeftElement()));
-      probabilityWordA.set(countWordA.get()/linesTotalCount);
+      Iterator<String> currentMapIter = wordsRHSCountsMap.keySet().iterator();
+      while(currentMapIter.hasNext()){
+        wordRHS = currentMapIter.next();
+        countWordsAB = wordsRHSCountsMap.get(wordRHS);
+        probabilityWordsAB = countWordsAB/linesTotalCount;
 
-      countWordB.set((float) dictionaryWordCount.get(wordsPair.getRightElement()));
-      probabilityWordB.set(countWordB.get()/linesTotalCount);
+        countWordA = dictionaryWordCount.get(wordLHS.toString());
+        probabilityWordA = countWordA/linesTotalCount;
 
-      //Calc 101 ;) Parenthesis are mandatory: 1a) 4/4*2=2; 2a) 4/2*4=8; whereas 1b) 4/(4*2)=0.5; 2b) 4/(2*4)=0.5
-      wordsAB_PMI.set(probabilityWordsAB.get()/(probabilityWordA.get()*probabilityWordB.get()));
-      wordsAB_PMIlog10.set((float) Math.log10((double) wordsAB_PMI.get()));
-      wordsPairPMIArray.set(wordsPairPMIValues);
-      context.write(wordsPair, wordsPairPMIArray);
+        countWordB = dictionaryWordCount.get(wordRHS);
+        probabilityWordB = countWordB/linesTotalCount;
+
+        //Calc 101 ;) Parenthesis are mandatory: 1a) 4/4*2=2; 2a) 4/2*4=8; whereas 1b) 4/(4*2)=0.5; 2b) 4/(2*4)=0.5
+        wordsAB_PMI = probabilityWordsAB/(probabilityWordA*probabilityWordB);
+        wordsAB_PMIlog10 = (float) Math.log10((double) wordsAB_PMI);
+        OUTPUT_MAP.put(wordRHS, wordsAB_PMIlog10);
+      }
+      context.write(wordLHS, OUTPUT_MAP);
     }
   }
 
@@ -331,27 +317,27 @@ public class StripesPMI extends Configured implements Tool {
     // 2nd MapReduce job. Only has a mapper, no reduce step.
     // Calculation of PMI(x,y) values based on the uniqueWord and uniqueWordPairs counts received in first MR job
     DistributedCache.addCacheFile(new URI(firstJobOutputPath+inputPathWordsCounts+"/output-r-00000"), jobConfig);
-//    Job job2 = Job.getInstance(jobConfig);
-//    job2.setJobName(StripesPMI.class.getSimpleName());
-//    job2.setJarByClass(StripesPMI.class);
-//
-//    job2.setNumReduceTasks(0);
-//    job2.setInputFormatClass(SequenceFileInputFormat.class);
-//    job2.setOutputFormatClass(TextOutputFormat.class);
-//    FileInputFormat.setInputPaths(job2, new Path(firstJobOutputPath+inputPathWordPairsCounts));
-//    FileOutputFormat.setOutputPath(job2, new Path(args.output));
-//
-//    job2.setMapOutputKeyClass(PairOfStrings.class);
-//    job2.setMapOutputValueClass(FloatArrayWritable.class);
-//    job2.setMapperClass(PointwiseMutualInformationMapper.class);
-//
-//    // Delete the output directory if it exists already.
-//    Path outputDir2 = new Path(args.output);
-//    FileSystem.get(jobConfig).delete(outputDir2, true);
-//
-//    long startTime2 = System.currentTimeMillis();
-//    job2.waitForCompletion(true);
-//    System.out.println("Second job finished in " + (System.currentTimeMillis() - startTime2) / 1000.0 + " seconds");
+    Job job2 = Job.getInstance(jobConfig);
+    job2.setJobName(StripesPMI.class.getSimpleName());
+    job2.setJarByClass(StripesPMI.class);
+
+    job2.setNumReduceTasks(0);
+    job2.setInputFormatClass(SequenceFileInputFormat.class);
+    job2.setOutputFormatClass(TextOutputFormat.class);
+    FileInputFormat.setInputPaths(job2, new Path(firstJobOutputPath+inputPathWordPairsCounts));
+    FileOutputFormat.setOutputPath(job2, new Path(args.output));
+
+    job2.setMapOutputKeyClass(Text.class);
+    job2.setMapOutputValueClass(HMapStFW.class);
+    job2.setMapperClass(PointwiseMutualInformationMapper.class);
+
+    // Delete the output directory if it exists already.
+    Path outputDir2 = new Path(args.output);
+    FileSystem.get(jobConfig).delete(outputDir2, true);
+
+    long startTime2 = System.currentTimeMillis();
+    job2.waitForCompletion(true);
+    System.out.println("Second job finished in " + (System.currentTimeMillis() - startTime2) / 1000.0 + " seconds");
 
     return 0;
   }
