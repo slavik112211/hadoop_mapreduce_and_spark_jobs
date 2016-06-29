@@ -1,0 +1,18 @@
+On 1GB wikipedia slice (parallelized to 8 mappers, 10 reducers):
+
+PairsPMI, with combiners:
+First job finished in 1041.609 seconds
+Second job finished in 26.519 seconds
+
+PairsPMI, no combiners:
+First job finished in 996.161 seconds
+Second job finished in 25.333 seconds
+
+
+StripesPMI, with combiners:
+First job finished in 741.272 seconds
+Second job finished in 30.532 seconds
+
+StripesPMI, no combiners:
+First job finished in 447.394 seconds
+Second job finished in 32.303 seconds

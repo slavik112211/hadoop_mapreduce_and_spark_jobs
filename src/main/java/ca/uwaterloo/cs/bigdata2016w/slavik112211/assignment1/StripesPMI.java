@@ -316,7 +316,6 @@ public class StripesPMI extends Configured implements Tool {
     // --------------------------------------------------
     // 2nd MapReduce job. Only has a mapper, no reduce step.
     // Calculation of PMI(x,y) values based on the uniqueWord and uniqueWordPairs counts received in first MR job
-    DistributedCache.addCacheFile(new URI(firstJobOutputPath+inputPathWordsCounts+"/output-r-00000"), jobConfig);
     Job job2 = Job.getInstance(jobConfig);
     job2.setJobName(StripesPMI.class.getSimpleName());
     job2.setJarByClass(StripesPMI.class);
