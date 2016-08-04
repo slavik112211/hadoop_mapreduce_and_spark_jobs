@@ -1,7 +1,7 @@
 package ca.uwaterloo.cs.bigdata2016w.slavik112211.assignment2
 
 import scala.collection.mutable.HashMap
-
+import scala.collection.mutable.Map
 import org.apache.log4j._
 import org.apache.hadoop.fs._
 import org.apache.spark.SparkContext
@@ -38,7 +38,7 @@ object ComputeBigramRelativeFrequencyStripesScala extends Tokenizer {
 
     val bigrams = textFile
       .flatMap(line => {
-        val stripes = new HashMap[String, HashMap[String, Float]]
+        val stripes = new HashMap[String, Map[String, Float]]
         val tokens = tokenize(line)
         if (tokens.length > 1) {
           val pairsIter = tokens.sliding(2)
@@ -61,14 +61,14 @@ object ComputeBigramRelativeFrequencyStripesScala extends Tokenizer {
             }
           }
         }
-        stripes
+        //transforming internal mutable.HashMap to immutable.HashMap, as stripe++stripe2 for mutable.HashMap is SLOOOW
+        stripes.mapValues(_.toMap)
       }).reduceByKey((stripe1, stripe2) => {
-      (stripe1++stripe2.map{ case (k,v) => k -> (v+stripe1.getOrElse(k,0.0f)) })
-        .asInstanceOf[HashMap[String,Float]]
+        (stripe1++stripe2.map{ case (k,v) => k -> (v+stripe1.getOrElse(k,0.0f)) })
       }).map(stripe =>{
         val sum = stripe._2.map(_._2).reduce(_+_)
         (stripe._1, stripe._2.mapValues(count=>count/sum))
       })
-    bigrams.coalesce(1).saveAsTextFile(args.output())
+    bigrams.saveAsTextFile(args.output()) //.coalesce(1)
   }
 }
