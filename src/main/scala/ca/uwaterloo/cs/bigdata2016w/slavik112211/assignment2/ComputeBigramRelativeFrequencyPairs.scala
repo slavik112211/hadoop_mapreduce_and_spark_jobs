@@ -1,7 +1,5 @@
 package ca.uwaterloo.cs.bigdata2016w.slavik112211.assignment2
 
-import scala.collection.mutable.HashMap
-
 import org.apache.log4j._
 import org.apache.hadoop.fs._
 import org.apache.spark.SparkContext
@@ -16,10 +14,26 @@ class BigramPairsConf(args: Seq[String]) extends ScallopConf(args) with Tokenize
   val reducers = opt[Int](descr = "number of reducers", required = false, default = Some(1))
 }
 
+case class WordPairKey(word1: String, word2: String) extends Ordered[WordPairKey] {
+  // Returns `x` where:
+  // `x <  0` when `this <  that`
+  // `x == 0` when `this == that`
+  // `x >  0` when `this >  that`
+  def compare(that: WordPairKey): Int = {
+    if(this.word1 != that.word1)
+      this.word1 compare that.word1
+    else if(this.word2 != "*" && that.word2 != "*")
+      this.word2 compare that.word2
+    else if(this.word2 == "*" && that.word2 != "*") -1
+    else if(this.word2 != "*" && that.word2 == "*") 1
+    else  0 //this.word2 == "*" && that.word2 == "*"
+  }
+}
+
 class WordPairFirstWordPartitioner(numParts: Int) extends Partitioner {
   override def numPartitions: Int = numParts
   override def getPartition(key: Any): Int = {
-    (key.asInstanceOf[List[String]].head.hashCode & Integer.MAX_VALUE) % numPartitions
+    (key.asInstanceOf[WordPairKey].word1.hashCode & Integer.MAX_VALUE) % numPartitions
   }
   // Java equals method to let Spark compare our Partitioner objects
   override def equals(other: Any): Boolean = other match {
@@ -43,7 +57,7 @@ object ComputeBigramRelativeFrequencyPairsScala extends Tokenizer {
     log.info("Number of reducers: " + args.reducers())
 
     val conf = new SparkConf()
-      .setMaster("local[5]")
+//      .setMaster("local[5]")
       .setAppName("Bigram Count")
       //https://ogirardot.wordpress.com/2015/01/09/changing-sparks-default-java-serialization-to-kryo/
       .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
@@ -58,22 +72,38 @@ object ComputeBigramRelativeFrequencyPairsScala extends Tokenizer {
     val bigrams = textFile
       .flatMap(line => {
         val tokens = tokenize(line)
-        if (tokens.length > 1) {
-          tokens.sliding(2).toList
-        } else List()
+        val bigrams = if (tokens.length > 1) tokens.sliding(2).toList else List()
+        bigrams.flatMap(wordPair => List(WordPairKey(wordPair.head, wordPair.last), WordPairKey(wordPair.head, "*")))
+          .map(wordPair => wordPair->1)
       })
-      .flatMap(wordPair => {
-        List((wordPair -> 1), (List(wordPair.head, "*") -> 1))
-      })
-      .partitionBy(new WordPairFirstWordPartitioner(3)).persist
 
-    val accum = bigrams.reduceByKey(_+_)
+    //reduceByKey() does a reshuffle of data across partitions,
+    //and then right after it, repartitionAndSortWithinPartitions() also does a reshuffle of data across partitions ;(
+    //ideally there would be one reshuffle.
+    //repartitioning is needed to ensure that all wordPairs with same word1 will end up in same partitions.
+    //sorting is needed to put ("foo", "*") on top of all other ("foo", "bar") pairs.
+    //("foo", "*") represents accumulated count of all pairs ("foo", "bar"), ("foo", "baz"), ("foo", "qux")
 
+    val bigramsAggregated = bigrams
+      .reduceByKey(_+_)
+      .repartitionAndSortWithinPartitions(new WordPairFirstWordPartitioner(args.reducers())).persist
 
-//    }).map(stripe =>{
-//      val sum = stripe._2.map(_._2).reduce(_+_)
-//      (stripe._1, stripe._2.mapValues(count=>count/sum))
-//    })
-    accum.saveAsTextFile(args.output()) //.coalesce(1)
+    val bigramsWeight = bigramsAggregated.mapPartitions(iter =>{
+      var outputList = List[(WordPairKey, Float)]()
+      //I'd better init totalPerWordPair to something else before dividing,
+      //unless of course I want the galaxy to explode ;)
+      var totalPerWordPair: Float = 0
+      while(iter.hasNext){
+        val wordPair = iter.next
+        if(wordPair._1.word2=="*")
+          totalPerWordPair = wordPair._2.toFloat
+        else
+          outputList .::= (wordPair._1, wordPair._2/totalPerWordPair)
+      }
+      outputList.iterator
+    }, true) //true - preserve partitions
+
+//    bigramsAggregated.saveAsTextFile(args.output()+"2")
+    bigramsWeight.saveAsTextFile(args.output())
   }
 }
